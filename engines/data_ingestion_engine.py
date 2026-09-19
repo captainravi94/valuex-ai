@@ -6,13 +6,9 @@ import pandas as pd
 import numpy as np
 
 def _parse_screener_datasheet(wb, uploaded_file):
-    """
-    Parses canonical Screener.in workbooks directly from 'Data Sheet',
-    handling companies with partial historical periods (e.g., Hyundai's 6-yr vs Vodafone's 10-yr).
-    """
     ws = wb['Data Sheet']
     
-    # 1. Company Name from cell B1
+    # 1. Company Name
     comp_name = ws.cell(1, 2).value
     if not comp_name:
         raw_name = uploaded_file.name.rsplit(".", 1)[0]
@@ -20,8 +16,7 @@ def _parse_screener_datasheet(wb, uploaded_file):
     else:
         comp_name = str(comp_name).strip().title()
 
-    # 2. Extract Active Date Columns from Row 16 (Report Date under PROFIT & LOSS)
-    # Hyundai has blank columns B-E and starts at F (FY21); Vodafone starts at B (FY17).
+    # 2. Extract Annual Date Columns (Row 16: P&L Report Date)
     date_cols = {}
     for col_idx in range(2, ws.max_column + 1):
         dt_val = ws.cell(16, col_idx).value
@@ -35,77 +30,103 @@ def _parse_screener_datasheet(wb, uploaded_file):
     if not date_cols:
         return None
 
-    # 3. Harvest metrics across P&L, Balance Sheet, and Cash Flow blocks
-    lines = {}
-    total_count = 0
-    for row_idx in range(16, ws.max_row + 1):
-        metric_cell = ws.cell(row_idx, 1).value
-        if not metric_cell:
-            continue
-        m_str = str(metric_cell).strip()
-        
-        # Skip section titles and repeated date headers
-        if m_str.upper() in ["PROFIT & LOSS", "QUARTERS", "BALANCE SHEET", "CASH FLOW:", "REPORT DATE"]:
-            continue
+    periods = list(date_cols.values())
+    raw_data = {}
 
-        row_vals = {}
-        for c_idx, period_label in date_cols.items():
-            cell_v = ws.cell(row_idx, c_idx).value
-            try:
-                row_vals[period_label] = float(cell_v) if cell_v is not None else 0.0
-            except (ValueError, TypeError):
-                row_vals[period_label] = 0.0
+    def extract_row_series(row_idx):
+        return {p: float(ws.cell(row_idx, c).value or 0.0) for c, p in date_cols.items()}
 
-        # Handle duplicate line-item names (e.g., 'Total' in BS liabilities vs assets)
-        if m_str.lower() == "total":
-            total_count += 1
-            metric_key = "Total Liabilities" if total_count == 1 else "total_assets"
-        elif m_str.lower() in [k.lower() for k in lines]:
-            metric_key = f"{m_str}_{row_idx}"
+    # 3. Read Statements by Explicit Row Boundaries (Prevents Quarterly Overwrite)
+    # P&L Section: Rows 17 to 35
+    for r in range(17, 36):
+        label = ws.cell(r, 1).value
+        if label and str(label).strip():
+            raw_data[str(label).strip().lower()] = extract_row_series(r)
+
+    # Balance Sheet Section: Rows 57 to 75
+    for r in range(57, 76):
+        label = ws.cell(r, 1).value
+        if label and str(label).strip():
+            key = str(label).strip().lower()
+            if key == "total":
+                key = "total_assets" if "total_liabilities" in raw_data else "total_liabilities"
+            raw_data[key] = extract_row_series(r)
+
+    # Cash Flow Section: Rows 82 to 89
+    for r in range(82, 90):
+        label = ws.cell(r, 1).value
+        if label and str(label).strip():
+            raw_data[str(label).strip().lower()] = extract_row_series(r)
+
+    # 4. Construct Canonical Statement Matrix
+    canonical = {}
+
+    # Revenue
+    canonical["revenue"] = raw_data.get("sales", {p: 0.0 for p in periods})
+
+    # EBITDA = PBT + Depreciation + Interest
+    pbt = raw_data.get("profit before tax", {p: 0.0 for p in periods})
+    dep = raw_data.get("depreciation", {p: 0.0 for p in periods})
+    inte = raw_data.get("interest", {p: 0.0 for p in periods})
+    other_inc = raw_data.get("other income", {p: 0.0 for p in periods})
+    canonical["ebitda"] = {p: pbt[p] + dep[p] + inte[p] for p in periods}
+    canonical["operating_ebitda"] = {p: max(canonical["ebitda"][p] - other_inc[p], 0.0) for p in periods}
+    canonical["other_income"] = other_inc
+
+    # PAT
+    canonical["pat"] = raw_data.get("net profit", {p: 0.0 for p in periods})
+
+    # Equity & Net Worth: Capital + Reserves (Resolves Net Worth Inconsistency)
+    equity_cap = raw_data.get("equity share capital", {p: 0.0 for p in periods})
+    reserves = raw_data.get("reserves", {p: 0.0 for p in periods})
+    canonical["equity_share_capital"] = equity_cap
+    canonical["reserves"] = reserves
+    canonical["total_equity"] = {p: equity_cap[p] + reserves[p] for p in periods}
+
+    # Borrowings & Debt
+    canonical["total_borrowings"] = raw_data.get("borrowings", {p: 0.0 for p in periods})
+
+    # Assets & Liabilities
+    canonical["total_assets"] = raw_data.get("total_assets", raw_data.get("total", {p: 0.0 for p in periods}))
+    canonical["total_liabilities"] = raw_data.get("total_liabilities", canonical["total_assets"])
+
+    # Working Capital Line Items
+    canonical["trade_receivables"] = raw_data.get("receivables", {p: 0.0 for p in periods})
+    canonical["inventories"] = raw_data.get("inventory", {p: 0.0 for p in periods})
+    canonical["cash_and_equivalents"] = raw_data.get("cash & bank", {p: 0.0 for p in periods})
+
+    # Operating Cash Flow (CFO)
+    canonical["cfo"] = raw_data.get("cash from operating activity", {p: 0.0 for p in periods})
+
+    # Derived Real Capex: Net Block(t) - Net Block(t-1) + Depreciation(t) + CWIP(t) - CWIP(t-1)
+    net_block = raw_data.get("net block", {p: 0.0 for p in periods})
+    cwip = raw_data.get("capital work in progress", {p: 0.0 for p in periods})
+    capex_series = {}
+    for i, p in enumerate(periods):
+        if i == 0:
+            capex_series[p] = dep[p]
         else:
-            metric_key = m_str
+            prev_p = periods[i - 1]
+            nb_delta = net_block[p] - net_block[prev_p]
+            cwip_delta = cwip[p] - cwip[prev_p]
+            computed_capex = nb_delta + dep[p] + cwip_delta
+            capex_series[p] = max(round(computed_capex, 2), 0.0)
 
-        lines[metric_key] = row_vals
+    canonical["capex"] = capex_series
+    canonical["fcf"] = {p: canonical["cfo"][p] - canonical["capex"][p] for p in periods}
 
-    # Construct clean DataFrame
-    df = pd.DataFrame(lines).T
+    df = pd.DataFrame(canonical).T
     df.index.name = "metric"
-    df.columns = [str(c) for c in df.columns]
-
-    # Map Operating Cash Flow if Screener labeled it 'Cash from Operating Activity'
-    for idx in list(df.index):
-        if "operating activit" in str(idx).lower() and "cfo" not in [i.lower() for i in df.index]:
-            df.loc["cfo"] = df.loc[idx]
-        if "borrowings" in str(idx).lower() and "total_borrowings" not in [i.lower() for i in df.index]:
-            df.loc["total_borrowings"] = df.loc[idx]
-        if "cash & bank" in str(idx).lower() and "cash_and_equivalents" not in [i.lower() for i in df.index]:
-            df.loc["cash_and_equivalents"] = df.loc[idx]
-
-    # Synthetic EBITDA calculation if not isolated in standard Screener sheet
-    if "ebitda" not in [str(i).lower() for i in df.index]:
-        sales_key = next((k for k in df.index if k.lower() == "sales"), None)
-        pbt_key = next((k for k in df.index if "profit before tax" in k.lower()), None)
-        dep_key = next((k for k in df.index if "depreciation" in k.lower()), None)
-        int_key = next((k for k in df.index if "interest" in k.lower()), None)
-        
-        if pbt_key and dep_key and int_key:
-            df.loc["ebitda"] = df.loc[pbt_key] + df.loc[dep_key] + df.loc[int_key]
-        elif sales_key:
-            exp_rows = [r for r in df.index if any(x in r.lower() for x in ["raw material", "employee", "power", "selling", "other mfr", "other expenses"])]
-            if exp_rows:
-                df.loc["ebitda"] = df.loc[sales_key] - df.loc[exp_rows].sum()
+    df.columns = periods
 
     currency = "$" if any(w in comp_name.lower() for w in ["inc", "corp", "apple", "tesla", "citi"]) else "₹"
     scale = "Cr" if currency == "₹" else "M"
 
-    return df, f"Successfully parsed {len(df.columns)} financial periods for {comp_name}", comp_name, "Corporate / Industrial", currency, scale, {"periods": list(df.columns)}
-
+    return df, f"Successfully parsed {len(periods)} financial periods for {comp_name}", comp_name, "Corporate / Industrial", currency, scale, {"periods": periods}
 
 def ingest_from_excel_or_csv(uploaded_file):
     try:
         fname = uploaded_file.name.lower()
-        
-        # --- PATH A: Dedicated Screener.in Ingestion Engine ---
         if fname.endswith((".xlsx", ".xls")):
             uploaded_file.seek(0)
             wb = openpyxl.load_workbook(uploaded_file, data_only=True)
@@ -114,7 +135,6 @@ def ingest_from_excel_or_csv(uploaded_file):
                 if result is not None:
                     return result
 
-        # --- PATH B: Standard Tabular CSV / Non-Screener Excel Ingestion ---
         uploaded_file.seek(0)
         if fname.endswith(".csv"):
             df_raw = pd.read_csv(uploaded_file, header=None)
@@ -127,7 +147,6 @@ def ingest_from_excel_or_csv(uploaded_file):
                     break
             df_raw = pd.read_excel(xl, sheet_name=sheet_to_use, header=None)
 
-        # Hunt for header row containing fiscal period labels
         header_row_idx = None
         for idx, row in df_raw.iloc[:50].iterrows():
             row_items = [str(v).strip() for v in row.values if pd.notna(v)]
@@ -151,7 +170,6 @@ def ingest_from_excel_or_csv(uploaded_file):
 
         df = df_raw.iloc[header_row_idx + 1:].copy()
         
-        # Deduplicate column headers
         seen = {}
         deduped_headers = []
         for h in headers:
@@ -170,7 +188,6 @@ def ingest_from_excel_or_csv(uploaded_file):
         df = df[~df["metric"].str.lower().str.contains("screener|http|www|report|source|notes", regex=True)]
         df = df[df["metric"] != ""]
 
-        # Keep columns containing numeric data
         valid_cols = ["metric"]
         for col in df.columns[1:]:
             s = df[col].iloc[:, 0] if isinstance(df[col], pd.DataFrame) else df[col]
