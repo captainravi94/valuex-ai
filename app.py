@@ -29,7 +29,7 @@ from utils.pdf_viewer import display_evidence_drawer
 from utils.pdf_exporter import InstitutionalPDFExporter
 
 st.set_page_config(
-    page_title="VALUEX AI | Institutional Financial & Credit Risk Intelligence", 
+    page_title="FinMatrix Terminal | Institutional Financial Forensics & Credit Intelligence", 
     page_icon="🏛️", 
     layout="wide"
 )
@@ -287,7 +287,7 @@ if st.session_state.pdf_bytes:
 # ======================== ENGINE 2: MSME CREDIT RISK =================
 # =====================================================================
 if st.session_state.platform_mode == "MSME Credit Risk (PD/LGD/ECL)":
-    st.title(f"🏢 ENGINE 2: MSME CREDIT RISK & UNDERWRITING PLATFORM")
+    st.title(f"🏢 FinMatrix Terminal | MSME Credit Risk & Underwriting")
     st.caption("Institutional Borrower Default Analytics | Basel III & IFRS 9 ECL Framework | Circular Banking & GST Audit")
 
     m_col1, m_col2, m_col3, m_col4 = st.columns(4)
@@ -377,8 +377,8 @@ if st.session_state.platform_mode == "MSME Credit Risk (PD/LGD/ECL)":
 # ================= ENGINE 1: CORPORATE FINANCIAL INTELLIGENCE ========
 # =====================================================================
 else:
-    st.title(f"🏛️ ENGINE 1: CORPORATE FINANCIAL FORENSICS | {company_name}")
-    st.caption(f"Taxonomy: **{taxonomy}** | Target Cycle: **{target_period}** | Multi-Period Financial Statement Spreading")
+    st.title(f"🏛️ FinMatrix Terminal | {company_name}")
+    st.caption(f"Taxonomy: **{taxonomy}** | Target Cycle: **{target_period}** | Multi-Period Financial Statement Spreading & Forensic Audit")
 
     # Data Integrity Alert Banners
     for chk in recon.get("checks", []):
@@ -582,11 +582,9 @@ else:
             rev_shock = st.slider("Revenue Growth Delta (%)", -50.0, 200.0, 15.0, 1.0)
             margin_shift = st.slider("Operating Margin Shift (bps)", -800, 800, 50, 25)
         with col_d2:
-            st.markdown("**2. Cost Structure & Working Capital**")
             cost_shock = st.slider("Input Cost / Inflation (%)", 0.0, 25.0, 2.0, 0.5)
             rec_drag = st.slider("Receivables / DSO Extension (Days)", -30, 60, 5, 1)
         with col_d3:
-            st.markdown("**3. Capital Structure & Reinvestment**")
             rate_shock = st.slider("Effective Debt Rate Shock (bps)", -150, 400, 25, 25)
             capex_growth = st.slider("Capex Expansion Budget (%)", -50.0, 150.0, 10.0, 5.0)
 
@@ -851,7 +849,7 @@ else:
 
         fcf_dossier_str = f"{unit}{curr_fcf:,.0f} {scale}" if curr_capex > 0 else "Pending Capex Audit"
 
-        cfo_report_md = f"""# EXECUTIVE CFO FINANCIAL DOSSIER
+        cfo_report_md = f"""# FINMATRIX TERMINAL | EXECUTIVE CFO FINANCIAL DOSSIER
 **ENTITY:** {company_name} | **TAXONOMY:** {taxonomy} | **CYCLE:** {target_period}
 * **Gross Sales:** {unit}{curr_rev:,.0f} {scale}
 * **Core Operating EBITDA (Excl. Other Inc):** {unit}{curr_ebitda_excl:,.0f} {scale} (Core Margin: {margin_core:.2f}%)
